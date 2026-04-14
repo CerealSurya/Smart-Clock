@@ -1,169 +1,13 @@
 import numpy as np
-import json
-import os
 import random
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
-from dataclasses import dataclass, field, asdict
 from typing import Optional
-from datetime import datetime, timedelta
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-ARMS = ["soft_beep", "loud_alarm", "strobe_light", "phone_buzz", "phone_call"]
-N_ARMS = len(ARMS)
-N_FEATURES = 8
+from bandit import AlarmEvent, AlarmContext, LinUCBBandit, compute_reward, ARMS, N_ARMS
 
 # Severity order used by escalation engine (least → most disruptive)
 SEVERITY_ORDER = [0, 2, 1, 3, 4]  # soft_beep→strobe→loud→buzz→call
-
-
-# ---------------------------------------------------------------------------
-# Context + Event dataclasses
-# ---------------------------------------------------------------------------
-
-@dataclass
-class AlarmContext:
-    hour: int                    # 0–23
-    day_of_week: int             # 0=Mon … 6=Sun
-    sleep_hours: float           # estimated hours slept
-    minutes_until_class: float   # 0–180+
-    semester_week: int           # 1–16
-    past_snooze_rate: float      # 0.0–1.0  (rolling avg over last 7 days)
-
-
-@dataclass
-class AlarmEvent:
-    context: AlarmContext
-    arm_chosen: int
-    escalation_steps: int        # 0 = woke on first modality
-    woke: bool
-    reward: float
-    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
-
-
-# ---------------------------------------------------------------------------
-# LinUCB core
-# ---------------------------------------------------------------------------
-
-class LinUCBArm:
-    """Single arm of a disjoint LinUCB bandit."""
-
-    def __init__(self, n_features: int, alpha: float):
-        self.alpha = alpha
-        self.A = np.identity(n_features)
-        self.b = np.zeros(n_features)
-
-    def ucb_score(self, x: np.ndarray) -> float:
-        A_inv = np.linalg.inv(self.A)
-        theta = A_inv @ self.b
-        return float(theta @ x + self.alpha * np.sqrt(x @ A_inv @ x))
-
-    def update(self, x: np.ndarray, reward: float):
-        self.A += np.outer(x, x)
-        self.b += reward * x
-
-    def expected_reward(self, x: np.ndarray) -> float:
-        """Exploitation-only estimate (no UCB bonus) — useful for evaluation."""
-        theta = np.linalg.inv(self.A) @ self.b
-        return float(theta @ x)
-
-
-class LinUCBBandit:
-    """
-    Contextual bandit that selects the best wake modality given an AlarmContext.
-
-    Feature vector (8-dim):
-        [sin(hour), cos(hour), day_of_week/6, sleep_hours/10,
-         min_until_class/180, semester_week/16, past_snooze_rate, 1.0]
-    """
-
-    def __init__(self, alpha: float = 1.0):
-        self.alpha = alpha
-        self.arms = [LinUCBArm(N_FEATURES, alpha) for _ in range(N_ARMS)]
-        self.history: list[AlarmEvent] = []
-
-    # ------------------------------------------------------------------
-    # Feature engineering
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def context_to_features(ctx: AlarmContext) -> np.ndarray:
-        return np.array([
-            np.sin(2 * np.pi * ctx.hour / 24),
-            np.cos(2 * np.pi * ctx.hour / 24),
-            ctx.day_of_week / 6.0,
-            min(ctx.sleep_hours, 10.0) / 10.0,
-            min(ctx.minutes_until_class, 180.0) / 180.0,
-            ctx.semester_week / 16.0,
-            ctx.past_snooze_rate,
-            1.0,  # bias
-        ])
-
-    # ------------------------------------------------------------------
-    # Core bandit interface
-    # ------------------------------------------------------------------
-
-    def select_arm(self, ctx: AlarmContext) -> int:
-        x = self.context_to_features(ctx)
-        scores = [arm.ucb_score(x) for arm in self.arms]
-        return int(np.argmax(scores))
-
-    def update(self, ctx: AlarmContext, arm: int, reward: float):
-        x = self.context_to_features(ctx)
-        self.arms[arm].update(x, reward)
-
-    def record(self, event: AlarmEvent):
-        self.history.append(event)
-        self.update(event.context, event.arm_chosen, event.reward)
-
-    # ------------------------------------------------------------------
-    # Persistence
-    # ------------------------------------------------------------------
-
-    def save(self, path: str = "bandit_state.json"):
-        state = {
-            "alpha": self.alpha,
-            "arms": [{"A": a.A.tolist(), "b": a.b.tolist()} for a in self.arms],
-        }
-        with open(path, "w") as f:
-            json.dump(state, f)
-        print(f"[Bandit] Saved to {path}")
-
-    def load(self, path: str = "bandit_state.json"):
-        if not os.path.exists(path):
-            print(f"[Bandit] No saved state at {path}, starting fresh.")
-            return
-        with open(path) as f:
-            state = json.load(f)
-        self.alpha = state["alpha"]
-        for arm, s in zip(self.arms, state["arms"]):
-            arm.A = np.array(s["A"])
-            arm.b = np.array(s["b"])
-            arm.alpha = self.alpha
-        print(f"[Bandit] Loaded from {path}")
-
-
-# ---------------------------------------------------------------------------
-# Reward function
-# ---------------------------------------------------------------------------
-
-def compute_reward(woke: bool, escalation_steps: int, response_time_s: float) -> float:
-    """
-    Reward is in [0, 1]:
-      - Base reward scales down with escalation steps needed.
-      - Time bonus rewards faster waking (within 10 minutes).
-      - Returns 0 if the student never woke.
-    """
-    if not woke:
-        return 0.0
-    base = max(0.0, 1.0 - escalation_steps * 0.3)
-    time_bonus = max(0.0, 0.2 - response_time_s / 600.0)
-    return min(1.0, base + time_bonus)
-
-
+#Only used in simulation ^^^ 
 # ---------------------------------------------------------------------------
 # Simulator  (replaces real hardware during development)
 # ---------------------------------------------------------------------------
@@ -491,7 +335,6 @@ def inspect_policy(bandit: LinUCBBandit):
         best = int(np.argmax(scores))
         score_str = "  ".join(f"{s:.2f}" for s in scores)
         print(f"  {label:<42} {ARMS[best]:<17} [{score_str}]")
-
 
 # ---------------------------------------------------------------------------
 # Entry point — quick demo
